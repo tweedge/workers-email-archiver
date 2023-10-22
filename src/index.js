@@ -46,12 +46,11 @@ export default {
     const endpoint = `https://${env.S3_BUCKET}.${env.S3_ENDPOINT}/`;
 
     // save it
-    const filename = `${domain}/${message.to}/${message.from}/${timeNow}.eml.gz`;
-    console.log(`${endpoint}${filename}`);
-
+    const filename = `${domain}/${message.to}/${message.from}/${timeNow}.eml.gz`.toLowerCase();
     const res = await aws.fetch(`${endpoint}${filename}`, {
       method: 'PUT',
       body: compressedEmail,
     });
+    console.log(`Compressed and saved email as ${timeNow}.eml.gz`);
   }
 }
