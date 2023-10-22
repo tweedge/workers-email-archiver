@@ -1,0 +1,9 @@
+name = "workers-email-archiver"
+main = "src/index.js"
+compatibility_date = "2023-10-16"
+
+[vars]
+# S3_ACCESS_KEY set in console as secret
+# S3_ACCESS_SECRET set in console as secret
+S3_BUCKET = "dmsh"
+S3_ENDPOINT = "j7w8.ch.idrivee2-42.com"

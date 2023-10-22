@@ -7,6 +7,10 @@
     "dev": "wrangler dev",
     "start": "wrangler dev"
   },
+  "dependencies": {
+    "aws4fetch": "^1.0.13",
+    "fflate": "^0.8.1"
+  },
   "devDependencies": {
     "wrangler": "^3.0.0"
   }
