@@ -45,3 +45,30 @@ A business probably wouldn't balk at paying $0.10-$1.80 per 1k emails. They're o
 But a rando would balk, and this rando set out to find a new email archiving solution after noticing my cloud bills skyrocketing due to a *choice* domain I picked up. What's a nerd to do? Build my own, of course.
 
 The lowest cost provider I could find was Cloudflare, which doesn't have any surchage for email processing, and the only expenses are Workers (TL;DR: what if the cloud ran JavaScript in the V8 engine). Workers has a generous free tier of 100,000 requests *per day* - so you can turn that bill of 75 * 0.1 = $7.5/day (*on the **low end***) into $0, as long as you don't mind losing email over that limit. Or pony up for a paid plan and spend $5/mo plus usage (magnitudes less money) if you're needing higher limits.
+
+### Misc
+
+Example API command to check if the the Cloudflare Email catch-all address is enabled for one of your domains and forwarding to Workers:
+
+```
+curl https://api.cloudflare.com/client/v4/zones/$ZONE_ID/email/routing/rules/catch_all \
+    -H 'Content-Type: application/json' \
+    -H "X-Auth-Email: $EMAIL" \
+    -H "X-Auth-Key: $KEY"
+```
+
+And example to enable the catch-all address sending everything to a Worker:
+
+```
+curl https://api.cloudflare.com/client/v4/zones/$ZONE_ID/email/routing/rules/catch_all \
+    -X PUT \
+    -H 'Content-Type: application/json' \
+    -H "X-Auth-Email: $EMAIL" \
+    -H "X-Auth-Key: $KEY" \
+    -d '{
+      "actions": [{"type":"worker","value":["workers-email-archiver"]}],
+      "matchers": [{"type":"all"}],
+      "enabled": true,
+      "name": ""
+    }'
+```

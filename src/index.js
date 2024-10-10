@@ -20,7 +20,6 @@ async function streamToArrayBuffer(stream, streamSize) {
 export default {
   async email(message, env, ctx) {
     // fetch context
-    console.log(`Processing email from ${message.from} to ${message.to}`);
     let timeNow = Date.now();
     const rawEmail = await streamToArrayBuffer(message.raw, message.rawSize);
 
@@ -51,6 +50,8 @@ export default {
       method: 'PUT',
       body: compressedEmail,
     });
-    console.log(`Compressed and saved email as ${timeNow}.eml.gz`);
+
+    // you done it! *crayon star*
+    console.log(`Saved email from ${message.from} to ${message.to} as ${timeNow}.eml.gz`);
   }
 }
