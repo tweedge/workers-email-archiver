@@ -28,8 +28,7 @@ export default {
       // GZIP-specific: the filename and time to use when decompressed
       filename: `${timeNow}.eml`,
       mtime: timeNow,
-      level: 9,
-      mem: 8
+      level: 6
     });
 
     // get the domain (used as top level folder)
