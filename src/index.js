@@ -52,6 +52,6 @@ export default {
     });
 
     // you done it! *crayon star*
-    console.log(`Saved email from ${message.from} to ${message.to} as ${timeNow}.eml.gz`);
+    console.log(`Archived ${filename}`);
   }
 }
