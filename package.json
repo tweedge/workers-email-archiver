@@ -12,8 +12,8 @@
     "whoami": "wrangler whoami"
   },
   "dependencies": {
-    "aws4fetch": "^1.0.13",
-    "fflate": "^0.8.1"
+    "aws4fetch": "^1.0.20",
+    "fflate": "^0.8.2"
   },
   "devDependencies": {
     "wrangler": "^3.80.2"
