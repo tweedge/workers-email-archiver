@@ -42,7 +42,8 @@ export default {
     const aws = new AwsClient({
       accessKeyId: env.S3_ACCESS_KEY,     
       secretAccessKey: env.S3_ACCESS_SECRET,
-      service: "s3"
+      service: "s3",
+      region: env.S3_REGION,
     });
 
     const endpoint = `https://${env.S3_BUCKET}.${env.S3_ENDPOINT}/`;
@@ -52,9 +53,14 @@ export default {
     const res = await aws.fetch(`${endpoint}${filename}`, {
       method: 'PUT',
       body: compressedEmail,
-    });
-
-    // you done it! *crayon star*
-    console.log(`Archived ${filename}`);
+    }).then(function(response) {
+      if (!response.ok) {
+        // fuck!
+        throw new Error(`Bad status code from ${endpoint}: ${response.status}`);
+      } else {
+        // you done it! *crayon star*
+        console.log(`Archived ${filename}`);
+      }
+    })
   }
 }
