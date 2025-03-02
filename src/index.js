@@ -18,6 +18,12 @@ async function streamToArrayBuffer(stream, streamSize) {
 }
 
 export default {
+  async fetch(request) {
+    const destinationURL = "https://github.com/tweedge/workers-email-archiver";
+    const statusCode = 307;
+    return Response.redirect(destinationURL, statusCode);
+  },
+
   async email(message, env, ctx) {
     // fetch context
     let timeNow = Date.now();
