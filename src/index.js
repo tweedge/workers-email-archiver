@@ -40,9 +40,13 @@ export default {
     // kill the original since we're memory-constrained
     rawEmail = new Uint8Array(1);
 
-    // get the domain (used as top level folder)
+    // get the recipient domain (used as top level folder)
     const emailDstSplit = message.to.split('@');
     const domain = emailDstSplit[1];
+
+    // and the source domain (used as bottom level folder)
+    const emailSrcSplit = message.from.split('@');
+    const srcDomain = emailSrcSplit[1];
 
     // set up to PUT object in S3
     const aws = new AwsClient({
@@ -55,7 +59,7 @@ export default {
     const endpoint = `https://${env.S3_BUCKET}.${env.S3_ENDPOINT}/`;
 
     // save it
-    const filename = `${domain}/${message.to}/${message.from}/${timeNow}.eml.gz`.toLowerCase();
+    const filename = `${domain}/${message.to}/${srcDomain}/${timeNow}.eml.gz`.toLowerCase();
     const res = await aws.fetch(`${endpoint}${filename}`, {
       method: 'PUT',
       body: compressedEmail,
