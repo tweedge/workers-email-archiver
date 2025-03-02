@@ -31,9 +31,6 @@ export default {
       level: 9
     });
 
-    // kill the original since we're memory-constrained
-    rawEmail = new Uint8Array(1);
-
     // get the domain (used as top level folder)
     const emailDstSplit = message.to.split('@');
     const domain = emailDstSplit[1];
