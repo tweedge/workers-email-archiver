@@ -1,0 +1,7 @@
+package-lock.json
+dist/
+coverage/
+.wrangler/
+
+# Excluded pending review: whitespace-only reformat of the existing worker.
+src/index.js
