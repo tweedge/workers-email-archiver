@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import worker from '../../src/index.js';
+import worker from '../../src/index';
 
 const encoder = new TextEncoder();
 

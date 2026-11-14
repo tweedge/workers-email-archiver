@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { gunzipSync } from 'node:zlib';
-import worker from '../src/index.js';
-import type { Env } from '../src/index.js';
+import worker from '../src/index';
+import type { Env } from '../src/index';
 
 const NOW = 1_700_000_000_000;
 const NOW_SECONDS = Math.floor(NOW / 1000);
@@ -226,21 +226,20 @@ describe('email handler', () => {
 		expect(decompressBody(captured!)).toEqual(body);
 	});
 
-	it('rejects a rawSize smaller than the stream contents', async () => {
-		const body = encoder.encode('12345');
-		const message = makeMessage({ raw: streamOf([body]), rawSize: 3 });
-
-		await expect(worker.email(message, ENV, makeContext())).rejects.toThrow(RangeError);
-		expect(captured).toBeUndefined();
-	});
-
-	it('documents zero-padding when rawSize exceeds the stream contents', async () => {
+	it('rejects a rawSize larger than the stream contents instead of zero-padding', async () => {
 		const body = encoder.encode('12345');
 		const message = makeMessage({ raw: streamOf([body]), rawSize: 8 });
 
-		await worker.email(message, ENV, makeContext());
+		await expect(worker.email(message, ENV, makeContext())).rejects.toThrow('Raw message size mismatch: read 5 bytes but expected 8');
+		expect(captured).toBeUndefined();
+	});
 
-		expect(Array.from(decompressBody(captured!))).toEqual([49, 50, 51, 52, 53, 0, 0, 0]);
+	it('rejects a rawSize smaller than the stream contents instead of truncating', async () => {
+		const body = encoder.encode('12345');
+		const message = makeMessage({ raw: streamOf([body]), rawSize: 3 });
+
+		await expect(worker.email(message, ENV, makeContext())).rejects.toThrow('Raw message size mismatch: read 5 bytes but expected 3');
+		expect(captured).toBeUndefined();
 	});
 
 	it('compresses with gzip level 9 and embeds filename and mtime', async () => {
@@ -280,23 +279,24 @@ describe('email handler', () => {
 		expect(objectPath(captured!)).toMatch(/\/mail\.example\.com\/\d+\.eml\.gz$/);
 	});
 
-	it('lowercases the entire object key', async () => {
+	it('lowercases the domains and key segments but keeps encoded locals readable', async () => {
 		await worker.email(makeMessage({ to: 'User+Tag@ExAmPlE.CoM', from: 'Sender@SENDER.Example' }), ENV, makeContext());
 
-		expect(objectPath(captured!)).toBe(`/example.com/user+tag@example.com/sender.example/${NOW}.eml.gz`);
+		expect(objectPath(captured!)).toBe(`/example.com/user%2Btag@example.com/sender.example/${NOW}.eml.gz`);
 	});
 
-	it('preserves plus and equals characters in the recipient local part', async () => {
+	it('percent-encodes plus and equals so the signature matches the request path', async () => {
 		await worker.email(makeMessage({ to: 'a+b=c@example.com' }), ENV, makeContext());
 
-		expect(objectPath(captured!)).toContain('/a+b=c@example.com/');
+		expect(objectPath(captured!)).toContain('/a%2Bb%3Dc@example.com/');
+		expect(objectPath(captured!)).not.toContain('+');
 		expect(captured!.headers.get('authorization')).toContain(`/${ENV.S3_REGION}/s3/aws4_request`);
 	});
 
-	it('characterizes equals characters in the recipient local part as literal path characters', async () => {
-		await worker.email(makeMessage({ to: 'a=b@example.com' }), ENV, makeContext());
+	it('encodes each reserved character that would desync the canonical path', async () => {
+		await worker.email(makeMessage({ to: 'a%2Bb?c#d!e(f)g*h@example.com' }), ENV, makeContext());
 
-		expect(objectPath(captured!)).toContain('/a=b@example.com/');
+		expect(objectPath(captured!)).toContain('/a%252bb%3Fc%23d%21e%28f%29g%2Ah@example.com/');
 	});
 
 	it('does not include the sender local part in the object key', async () => {
@@ -375,7 +375,7 @@ describe('email handler', () => {
 		};
 
 		await expect(withImmediateRetries(() => worker.email(makeMessage({}), ENV, makeContext()))).rejects.toThrow(/Bad status code/);
-		expect(attempts).toBe(11);
+		expect(attempts).toBe(4);
 	});
 
 	it('retries 5xx responses and succeeds on a later attempt', async () => {
@@ -404,14 +404,89 @@ describe('email handler', () => {
 		expect(attempts).toBe(2);
 	});
 
-	it('documents that network errors are not retried', async () => {
+	it('retries transient network errors and succeeds later', async () => {
+		let attempts = 0;
+		fetchImpl = async () => {
+			attempts += 1;
+			if (attempts < 3) throw new TypeError('network down');
+			return new Response(null, { status: 200 });
+		};
+
+		await withImmediateRetries(() => worker.email(makeMessage({}), ENV, makeContext()));
+
+		expect(attempts).toBe(3);
+	});
+
+	it('throws after retries are exhausted on persistent network errors', async () => {
 		let attempts = 0;
 		fetchImpl = async () => {
 			attempts += 1;
 			throw new TypeError('network down');
 		};
 
-		await expect(worker.email(makeMessage({}), ENV, makeContext())).rejects.toThrow('network down');
+		await expect(withImmediateRetries(() => worker.email(makeMessage({}), ENV, makeContext()))).rejects.toThrow(/network down/);
+		expect(attempts).toBe(4);
+	});
+
+	it('retries when a non-Error value is thrown, then fails with a generic message', async () => {
+		let attempts = 0;
+		fetchImpl = async () => {
+			attempts += 1;
+			throw 'boom';
+		};
+
+		await expect(withImmediateRetries(() => worker.email(makeMessage({}), ENV, makeContext()))).rejects.toThrow(
+			`Upload to https://${ENV.S3_BUCKET}.${ENV.S3_ENDPOINT}/ failed`,
+		);
+		expect(attempts).toBe(4);
+	});
+
+	it('ignores empty stream chunks without changing byte accounting', async () => {
+		const body = encoder.encode('payload');
+		const message = makeMessage({
+			raw: streamOf([new Uint8Array(0), body, new Uint8Array(0)]),
+			rawSize: body.byteLength,
+		});
+
+		await worker.email(message, ENV, makeContext());
+
+		expect(decompressBody(captured!)).toEqual(body);
+	});
+
+	it('passes an abort signal so a hung upload cannot block forever', async () => {
+		let signal: AbortSignal | undefined;
+		fetchImpl = async (request) => {
+			signal = request.signal;
+			return new Response(null, { status: 200 });
+		};
+
+		await worker.email(makeMessage({}), ENV, makeContext());
+
+		expect(signal).toBeInstanceOf(AbortSignal);
+		expect(signal!.aborted).toBe(false);
+	});
+
+	it('retries a timed-out attempt', async () => {
+		let attempts = 0;
+		fetchImpl = async () => {
+			attempts += 1;
+			if (attempts === 1) throw Object.assign(new Error('timed out'), { name: 'TimeoutError' });
+			return new Response(null, { status: 200 });
+		};
+
+		await withImmediateRetries(() => worker.email(makeMessage({}), ENV, makeContext()));
+
+		expect(attempts).toBe(2);
+	});
+
+	it('does not retry a non-retryable error', async () => {
+		let attempts = 0;
+		fetchImpl = async () => {
+			attempts += 1;
+			throw Object.assign(new Error('bad key'), { name: 'InvalidAccessKeyId' });
+		};
+
+		await expect(withImmediateRetries(() => worker.email(makeMessage({}), ENV, makeContext()))).rejects.toThrow(/bad key/);
 		expect(attempts).toBe(1);
 	});
 
@@ -422,16 +497,26 @@ describe('email handler', () => {
 		expect(captured).toBeUndefined();
 	});
 
-	it('documents addresses without a domain mapping to an undefined path segment', async () => {
-		await worker.email(makeMessage({ to: 'nodomain' }), ENV, makeContext());
-
-		expect(objectPath(captured!)).toBe(`/undefined/nodomain/sender.example/${NOW}.eml.gz`);
+	it('rejects a recipient address without a domain', async () => {
+		await expect(worker.email(makeMessage({ to: 'nodomain' }), ENV, makeContext())).rejects.toThrow(
+			'Invalid recipient address: "nodomain"',
+		);
+		expect(captured).toBeUndefined();
 	});
 
-	it('documents addresses with multiple @ characters using the first domain segment', async () => {
+	it('rejects a sender address without a domain', async () => {
+		await expect(worker.email(makeMessage({ from: 'nodomain' }), ENV, makeContext())).rejects.toThrow('Invalid sender address: "nodomain"');
+		expect(captured).toBeUndefined();
+	});
+
+	it('rejects an address with a trailing @', async () => {
+		await expect(worker.email(makeMessage({ to: 'user@' }), ENV, makeContext())).rejects.toThrow('Invalid recipient address: "user@"');
+	});
+
+	it('uses the last @ so quoted local parts resolve to the real domain', async () => {
 		await worker.email(makeMessage({ to: 'a@b@example.com', from: 'c@d@example.com' }), ENV, makeContext());
 
-		expect(objectPath(captured!)).toBe(`/b/a@b@example.com/d/${NOW}.eml.gz`);
+		expect(objectPath(captured!)).toBe(`/example.com/a@b@example.com/example.com/${NOW}.eml.gz`);
 	});
 
 	it('builds the endpoint from the configured bucket and endpoint', async () => {

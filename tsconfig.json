@@ -13,6 +13,6 @@
 		"noImplicitOverride": true,
 		"noFallthroughCasesInSwitch": true
 	},
-	"include": ["src/**/*.d.ts", "test/*.test.ts", "vitest.config.mts"],
+	"include": ["src/**/*.ts", "test/*.test.ts", "vitest.config.mts"],
 	"exclude": ["node_modules"]
 }

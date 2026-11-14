@@ -9,7 +9,7 @@ This is a Workers script that I use to receive email via Cloudflare Workers, com
 - [fflate](https://github.com/101arrowz/fflate) to compress data using gzip
 - [aws4fetch](https://github.com/mhart/aws4fetch) to save the compressed data to S3
 
-This script and its dependencies are pure-JavaScript and weigh in at ~25KB total.
+The worker is written in TypeScript (`src/index.ts`) and, with its dependencies, bundles to roughly 30KB (under 10KB gzipped).
 
 ### Usage
 
