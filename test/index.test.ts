@@ -453,6 +453,32 @@ describe('email handler', () => {
 		expect(decompressBody(captured!)).toEqual(body);
 	});
 
+	it('applies an 8s per-attempt timeout inside a 20s overall budget', async () => {
+		const timeouts: number[] = [];
+		const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+		vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+			timeouts.push(ms);
+			return realTimeout(ms);
+		});
+
+		await worker.email(makeMessage({}), ENV, makeContext());
+
+		expect(timeouts).toEqual([8_000]);
+	});
+
+	it('stops retrying once the overall upload budget is exhausted', async () => {
+		let attempts = 0;
+		fetchImpl = async () => {
+			attempts += 1;
+			// Simulate each attempt consuming the entire budget.
+			vi.setSystemTime(new Date(NOW + 20_000 * attempts));
+			return new Response(null, { status: 503 });
+		};
+
+		await expect(withImmediateRetries(() => worker.email(makeMessage({}), ENV, makeContext()))).rejects.toThrow(/Bad status code/);
+		expect(attempts).toBe(1);
+	});
+
 	it('passes an abort signal so a hung upload cannot block forever', async () => {
 		let signal: AbortSignal | undefined;
 		fetchImpl = async (request) => {

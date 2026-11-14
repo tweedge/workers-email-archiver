@@ -13,7 +13,11 @@ const REDIRECT_URL = 'https://github.com/tweedge/workers-email-archiver';
 const REDIRECT_STATUS = 307;
 const UPLOAD_ATTEMPTS = 4;
 const INITIAL_RETRY_MS = 250;
-const UPLOAD_TIMEOUT_MS = 15_000;
+// Email Workers have no documented wall-clock limit, but inbound SMTP wants a
+// prompt answer and the platform has historically cut email handlers off
+// around 30s. Keep the whole retry sequence inside a budget well under that.
+const UPLOAD_BUDGET_MS = 20_000;
+const UPLOAD_TIMEOUT_MS = 8_000;
 
 class UploadError extends Error {
 	readonly retryable: boolean;
@@ -108,17 +112,22 @@ function delay(ms: number): Promise<void> {
 
 /**
  * Uploads with a bounded retry policy covering 5xx/429 responses, timeouts,
- * and transport failures. Each attempt gets its own timeout so a hung
- * connection cannot block the handler indefinitely.
+ * and transport failures. The whole sequence shares one overall deadline so
+ * retries can never outlive the inbound SMTP exchange, and each attempt is
+ * additionally capped by that remaining budget.
  */
 async function uploadWithRetry(aws: AwsClient, url: string, body: Uint8Array, label: string): Promise<void> {
+	const deadline = Date.now() + UPLOAD_BUDGET_MS;
 	let lastError: UploadError | undefined;
 
 	for (let attempt = 0; attempt < UPLOAD_ATTEMPTS; attempt++) {
 		if (attempt > 0) {
 			const backoff = INITIAL_RETRY_MS * 2 ** (attempt - 1);
-			await delay(backoff + Math.random() * INITIAL_RETRY_MS);
+			await delay(Math.min(backoff + Math.random() * INITIAL_RETRY_MS, Math.max(0, deadline - Date.now())));
 		}
+
+		const remaining = deadline - Date.now();
+		if (remaining <= 0) break;
 
 		let response: Response;
 		try {
@@ -126,7 +135,7 @@ async function uploadWithRetry(aws: AwsClient, url: string, body: Uint8Array, la
 				method: 'PUT',
 				// lib.dom's BodyInit omits ArrayBufferView; the Workers runtime accepts it.
 				body: body as unknown as BodyInit,
-				signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
+				signal: AbortSignal.timeout(Math.min(UPLOAD_TIMEOUT_MS, remaining)),
 			});
 		} catch (error) {
 			const uploadError = toUploadError(error, label);
