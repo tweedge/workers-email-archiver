@@ -299,6 +299,18 @@ describe('email handler', () => {
 		expect(objectPath(captured!)).toContain('/a%252bb%3Fc%23d%21e%28f%29g%2Ah@example.com/');
 	});
 
+	it('encodes a backslash so it cannot become a path separator', async () => {
+		await worker.email(makeMessage({ to: 'a\\b@example.com' }), ENV, makeContext());
+
+		expect(objectPath(captured!)).toContain('/a%5Cb@example.com/');
+	});
+
+	it('encodes multi-byte whitespace as valid UTF-8 escapes', async () => {
+		await worker.email(makeMessage({ to: 'a\u00a0b@example.com' }), ENV, makeContext());
+
+		expect(objectPath(captured!)).toContain('/a%C2%A0b@example.com/');
+	});
+
 	it('does not include the sender local part in the object key', async () => {
 		await worker.email(makeMessage({ from: 'local+part=value@Sender.Example' }), ENV, makeContext());
 
@@ -466,6 +478,32 @@ describe('email handler', () => {
 		expect(timeouts).toEqual([8_000]);
 	});
 
+	it('clamps a later attempt to the remaining overall budget', async () => {
+		const timeouts: number[] = [];
+		const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+		vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+			timeouts.push(ms);
+			return realTimeout(ms);
+		});
+		let attempts = 0;
+		fetchImpl = async () => {
+			attempts += 1;
+			if (attempts === 1) {
+				// First attempt consumes ~15s of the 20s budget.
+				vi.setSystemTime(new Date(NOW + 15_000));
+				return new Response(null, { status: 503 });
+			}
+			return new Response(null, { status: 200 });
+		};
+
+		await withImmediateRetries(() => worker.email(makeMessage({}), ENV, makeContext()));
+
+		expect(attempts).toBe(2);
+		expect(timeouts[0]).toBe(8_000);
+		expect(timeouts[1]).toBeGreaterThan(0);
+		expect(timeouts[1]).toBeLessThan(8_000);
+	});
+
 	it('stops retrying once the overall upload budget is exhausted', async () => {
 		let attempts = 0;
 		fetchImpl = async () => {
@@ -479,8 +517,13 @@ describe('email handler', () => {
 		expect(attempts).toBe(1);
 	});
 
-	it('passes an abort signal so a hung upload cannot block forever', async () => {
+	it('forwards the abort signal to the upload request', async () => {
 		let signal: AbortSignal | undefined;
+		let controller: AbortController | undefined;
+		vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => {
+			controller = new AbortController();
+			return controller.signal;
+		});
 		fetchImpl = async (request) => {
 			signal = request.signal;
 			return new Response(null, { status: 200 });
@@ -490,6 +533,10 @@ describe('email handler', () => {
 
 		expect(signal).toBeInstanceOf(AbortSignal);
 		expect(signal!.aborted).toBe(false);
+		// A default signal from aws4fetch would not react to this controller;
+		// propagation proves init.signal reached the signed request.
+		controller!.abort(new Error('test abort'));
+		expect(signal!.aborted).toBe(true);
 	});
 
 	it('retries a timed-out attempt', async () => {

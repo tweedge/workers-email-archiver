@@ -49,7 +49,7 @@ npm run format:check  # Prettier check
 npm run ci            # all of the above plus a Wrangler dry-run bundle
 ```
 
-CI (`.github/workflows/ci.yml`) runs formatting, typechecking, the coverage-gated test suite, and a Wrangler dry-run on Node 22 and 24 for every push and pull request to `main`.
+CI (`.github/workflows/ci.yml`) runs formatting, typechecking, the coverage-gated unit suite, the workers-runtime integration tests, and a Wrangler dry-run on Node 22 and 24 for every push and pull request to `main`.
 
 ### Automated deployment
 

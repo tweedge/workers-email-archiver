@@ -87,11 +87,21 @@ function splitAddress(address: string, field: string): { local: string; domain: 
  * request path disagree with SigV4's canonical URI. Notably `+` is decoded as
  * a space by the signer, which breaks signatures for plus-addressed mail.
  * Percent-encoding is kept deliberately narrow (`+`, `=`, `%`, query/fragment
- * delimiters, whitespace, and the RFC 3986 sub-delims the signer normalizes)
- * so object keys stay readable.
+ * delimiters, whitespace, `\`, and the RFC 3986 sub-delims the signer
+ * normalizes) so object keys stay readable.
+ *
+ * `/` is intentionally left raw: encoding it to `%2F` would make the stored
+ * key diverge from the signer's canonical path, because aws4fetch collapses
+ * `%2F` back to `/` when canonicalizing. Each character is encoded
+ * individually so multi-byte whitespace (e.g. U+00A0, U+2028) produces valid
+ * UTF-8 escapes rather than truncated code-unit escapes.
  */
 function encodeKeySegment(value: string): string {
-	return value.toLowerCase().replace(/[%+=?#\s!'()*]/g, (char) => '%' + char.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
+	return value
+		.toLowerCase()
+		.replace(/[%+=?#\s!'()*\\]/g, (char) =>
+			encodeURIComponent(char).replace(/[!'()*]/g, (escaped) => '%' + escaped.charCodeAt(0).toString(16).toUpperCase()),
+		);
 }
 
 function isRetryableStatus(status: number): boolean {
