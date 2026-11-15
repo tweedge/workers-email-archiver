@@ -6,25 +6,25 @@
 
 This is a Workers script that I use to receive email via Cloudflare Workers, compress the raw email, and store that compressed data in an S3-compatible provider for long-term archiving and analysis. It uses:
 
-* [fflate](https://github.com/101arrowz/fflate) to compress data using gzip
-* [aws4fetch](https://github.com/mhart/aws4fetch) to save the compressed data to S3
+- [fflate](https://github.com/101arrowz/fflate) to compress data using gzip
+- [aws4fetch](https://github.com/mhart/aws4fetch) to save the compressed data to S3
 
-This script and its dependencies are pure-JavaScript and weigh in at ~25KB total.
+The worker is written in TypeScript (`src/index.ts`) and, with its dependencies, bundles to roughly 30KB (under 10KB gzipped).
 
 ### Usage
 
 This repo is what I personally use and isn't a template/general-use tool - please feel free to use/copy/adapt it (per LICENSE.txt) but updates may break things and you may need to tweak what's happening for your specific needs.
 
-The only variables you'll *probably* need to tinker with to get started are:
+The only variables you'll _probably_ need to tinker with to get started are:
 
-* In `wrangler.toml`, replace `S3_BUCKET` with your bucket name and `S3_ENDPOINT` with the S3 server you're using (this is the full endpoint, the entire domain including the region - if applicable).
-* After deploying for the first time, add secrets named `S3_ACCESS_KEY` and `S3_ACCESS_SECRET` with your S3 signing credentials. Or just add them to your `wrangler.toml` if you're sure you won't accidentally commit or expose them (hint: this is a risk, and probably not one worth taking).
+- In `wrangler.toml`, replace `S3_BUCKET` with your bucket name and `S3_ENDPOINT` with the S3 server you're using (this is the full endpoint, the entire domain including the region - if applicable).
+- After deploying for the first time, add secrets named `S3_ACCESS_KEY` and `S3_ACCESS_SECRET` with your S3 signing credentials. Or just add them to your `wrangler.toml` if you're sure you won't accidentally commit or expose them (hint: this is a risk, and probably not one worth taking).
 
 Commonly-used commands:
 
 ```
 # install dependencies
-npm install
+npm ci
 
 # deploy worker
 npm run deploy  # you'll be prompted to log in if you aren't already
@@ -36,15 +36,39 @@ npm run logout
 npm run tail
 ```
 
+### Testing
+
+The worker's behavior is covered by a Vitest suite that mocks the S3 endpoint and inspects the signed request, the gzip container, and the object key:
+
+```
+npm test              # run the test suite once
+npm run test:watch    # watch mode
+npm run test:coverage # enforce the 100% coverage threshold
+npm run typecheck     # TypeScript checks for the tests and worker types
+npm run format:check  # Prettier check
+npm run ci            # all of the above plus a Wrangler dry-run bundle
+```
+
+CI (`.github/workflows/ci.yml`) runs formatting, typechecking, the coverage-gated unit suite, the workers-runtime integration tests, and a Wrangler dry-run on Node 22 and 24 for every push and pull request to `main`.
+
+### Automated deployment
+
+`.github/workflows/deploy.yml` deploys to Cloudflare Workers on every push to `main` (and can be run manually via `workflow_dispatch`) after the same format/typecheck/test gates pass. It requires these repository secrets:
+
+- `CLOUDFLARE_API_TOKEN` — an API token with the **Workers Scripts: Edit** permission (scoped to the target account).
+- `CLOUDFLARE_ACCOUNT_ID` — the Cloudflare account ID that owns the worker.
+
+`S3_ACCESS_KEY` and `S3_ACCESS_SECRET` stay as Worker secrets (`wrangler secret put ...`) and are never part of the build or CI; deployments update code only and leave existing secrets intact.
+
 ### Why did you make this?
 
 Let's say, hypothetically, you had 75k emails coming in per day which you needed to store somewhere for later processing. Maybe you're a business, and you require the upmost uptime and missing even one email would be a catastrophe. Or maybe you're some random security engineer buying expired domains to guard against account takeover attacks and track/report spam.
 
 A business probably wouldn't balk at paying $0.10-$1.80 per 1k emails. They're overpaying for the emails, but paying for the hands-off solutions, someone you can page overnight if there's a problem with that service, support, etc.
 
-But a rando would balk, and this rando set out to find a new email archiving solution after noticing my cloud bills skyrocketing due to a *choice* domain I picked up. What's a nerd to do? Build my own, of course.
+But a rando would balk, and this rando set out to find a new email archiving solution after noticing my cloud bills skyrocketing due to a _choice_ domain I picked up. What's a nerd to do? Build my own, of course.
 
-The lowest cost provider I could find was Cloudflare, which doesn't have any surchage for email processing, and the only expenses are Workers (TL;DR: what if the cloud ran JavaScript in the V8 engine). Workers has a generous free tier of 100,000 requests *per day* - so you can turn that bill of 75 * 0.1 = $7.5/day (*on the **low end***) into $0, as long as you don't mind losing email over that limit. Or pony up for a paid plan and spend $5/mo plus usage (magnitudes less money) if you're needing higher limits.
+The lowest cost provider I could find was Cloudflare, which doesn't have any surchage for email processing, and the only expenses are Workers (TL;DR: what if the cloud ran JavaScript in the V8 engine). Workers has a generous free tier of 100,000 requests _per day_ - so you can turn that bill of 75 * 0.1 = $7.5/day (_on the **low end**_) into $0, as long as you don't mind losing email over that limit. Or pony up for a paid plan and spend $5/mo plus usage (magnitudes less money) if you're needing higher limits.
 
 ### Misc
 
