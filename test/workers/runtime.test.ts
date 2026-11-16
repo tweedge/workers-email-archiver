@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../../src/index';
-import type { ArchiveMessage } from '../../src/index';
 
 const encoder = new TextEncoder();
 
@@ -11,17 +10,6 @@ const ENV_BASE = {
 	S3_BUCKET: 'archive-bucket',
 	S3_ENDPOINT: 'p2v3.va.idrivee2-43.com',
 };
-
-function makeEnv(sends: ArchiveMessage[]): Record<string, unknown> {
-	return {
-		...ENV_BASE,
-		ARCHIVE_QUEUE: {
-			send: async (message: ArchiveMessage) => {
-				sends.push(message);
-			},
-		},
-	};
-}
 
 function makeMessage(body: Uint8Array): ForwardableEmailMessage {
 	const raw = new ReadableStream<Uint8Array>({
@@ -42,6 +30,38 @@ function makeMessage(body: Uint8Array): ForwardableEmailMessage {
 	} as unknown as ForwardableEmailMessage;
 }
 
+/** Collects waitUntil promises so the test can await the background upload. */
+function makeContext(promises: Promise<unknown>[]): ExecutionContext {
+	return {
+		waitUntil: (promise: Promise<unknown>) => {
+			promises.push(promise);
+		},
+		passThroughOnException() {},
+	} as unknown as ExecutionContext;
+}
+
+async function archive(body: Uint8Array, onRequest: (request: Request) => Promise<Response>): Promise<Request> {
+	let captured: Request | undefined;
+	vi.stubGlobal('fetch', async (request: Request) => {
+		captured = request;
+		return onRequest(request);
+	});
+
+	const promises: Promise<unknown>[] = [];
+	await worker.email(makeMessage(body), ENV_BASE as never, makeContext(promises));
+	await Promise.all(promises);
+
+	expect(captured).toBeDefined();
+	return captured!;
+}
+
+async function inflate(request: Request): Promise<Uint8Array> {
+	const uploaded = new Uint8Array(await request.arrayBuffer());
+	return new Uint8Array(
+		await new Response(new Response(uploaded as unknown as BodyInit).body!.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer(),
+	);
+}
+
 afterEach(() => {
 	vi.unstubAllGlobals();
 	vi.restoreAllMocks();
@@ -54,112 +74,65 @@ describe('workers runtime', () => {
 		expect(response.headers.get('location')).toBe('https://github.com/tweedge/workers-email-archiver');
 	});
 
-	it('compresses an email with the real gzip encoder and queues it', async () => {
-		const sends: ArchiveMessage[] = [];
+	it('archives an email through a signed PUT to a mocked S3 endpoint', async () => {
 		const body = encoder.encode('Subject: runtime\r\n\r\nhello from workerd');
 
-		await worker.email(
-			makeMessage(body),
-			makeEnv(sends) as never,
-			{ waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext,
-		);
+		const request = await archive(body, async () => new Response(null, { status: 200 }));
 
-		expect(sends).toHaveLength(1);
-		const queued = sends[0]!;
-		expect(queued.key).toMatch(/^example\.com\/user@example\.com\/mail\.example\.com\/\d+\.eml\.gz$/);
-		expect(queued.body[0]).toBe(0x1f);
-		expect(queued.body[1]).toBe(0x8b);
-		expect(queued.body[2]).toBe(8);
-		expect((queued.body[3] ?? 0) & 0x08).toBe(0x08);
-
-		const restored = new Uint8Array(
-			await new Response(new Response(queued.body as unknown as BodyInit).body!.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer(),
+		expect(request.method).toBe('PUT');
+		expect(request.url).toMatch(
+			/^https:\/\/archive-bucket\.p2v3\.va\.idrivee2-43\.com\/example\.com\/user@example\.com\/mail\.example\.com\/\d+\.eml\.gz$/,
 		);
-		expect(restored).toEqual(body);
+		const authorization = request.headers.get('authorization') ?? '';
+		expect(authorization).toMatch(/^AWS4-HMAC-SHA256 Credential=/);
+		expect(request.headers.get('x-amz-content-sha256')).toBe('UNSIGNED-PAYLOAD');
+
+		const uploaded = new Uint8Array(await request.clone().arrayBuffer());
+		expect(uploaded.byteLength).toBeGreaterThan(0);
+		expect(uploaded[0]).toBe(0x1f);
+		expect(uploaded[1]).toBe(0x8b);
+		expect(uploaded[2]).toBe(8);
+		expect((uploaded[3] ?? 0) & 0x08).toBe(0x08);
+		expect(new DataView(uploaded.buffer, uploaded.byteOffset, uploaded.byteLength).getUint32(4, true)).toBeGreaterThan(0);
+
+		expect(await inflate(request)).toEqual(body);
 	});
 
 	it('round-trips an empty message', async () => {
-		const sends: ArchiveMessage[] = [];
+		const request = await archive(new Uint8Array(0), async () => new Response(null, { status: 200 }));
 
-		await worker.email(
-			makeMessage(new Uint8Array(0)),
-			makeEnv(sends) as never,
-			{
-				waitUntil() {},
-				passThroughOnException() {},
-			} as unknown as ExecutionContext,
-		);
-
-		const queued = sends[0]!;
-		const restored = new Uint8Array(
-			await new Response(new Response(queued.body as unknown as BodyInit).body!.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer(),
-		);
-		expect(restored.byteLength).toBe(0);
+		expect((await inflate(request)).byteLength).toBe(0);
 	});
 
-	it('round-trips the largest payload we expect to queue', async () => {
-		const sends: ArchiveMessage[] = [];
+	it('round-trips the largest payload we expect to archive', async () => {
 		const body = new Uint8Array(4_000_000);
 		for (let i = 0; i < body.length; i += 64) body[i] = i & 0xff;
 
-		await worker.email(
-			makeMessage(body),
-			makeEnv(sends) as never,
-			{ waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext,
-		);
+		const request = await archive(body, async () => new Response(null, { status: 200 }));
 
-		const queued = sends[0]!;
-		const restored = new Uint8Array(
-			await new Response(new Response(queued.body as unknown as BodyInit).body!.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer(),
-		);
+		const restored = await inflate(request);
 		expect(restored.byteLength).toBe(body.byteLength);
 		expect(restored[0]).toBe(0);
 		expect(restored[64]).toBe(64);
 	});
 
-	it('consumes a queued message and uploads it to a mocked S3 endpoint', async () => {
+	it('does not reject the email when the upload fails', async () => {
+		const body = encoder.encode('Subject: failing\r\n\r\nbody');
+		let attempts = 0;
 		let captured: Request | undefined;
 		vi.stubGlobal('fetch', async (request: Request) => {
 			captured = request;
-			return new Response(null, { status: 200 });
+			attempts += 1;
+			return new Response(null, { status: 403 });
 		});
-		const payload = new Uint8Array(
-			await new Response(
-				new Response(encoder.encode('Subject: queued\r\n\r\nhello') as unknown as BodyInit).body!.pipeThrough(
-					new CompressionStream('gzip'),
-				),
-			).arrayBuffer(),
-		);
-		const acked: string[] = [];
+		const promises: Promise<unknown>[] = [];
 
-		await worker.queue(
-			{
-				queue: 'email-archiver-spool',
-				messages: [
-					{
-						id: 'm1',
-						timestamp: new Date(),
-						body: { key: 'example.com/user@example.com/mail.example.com/1700000000000.eml.gz', body: payload },
-						attempts: 1,
-						ack: () => acked.push('m1'),
-						retry: () => {},
-					},
-				],
-				ackAll: () => {},
-				retryAll: () => {},
-			} as unknown as MessageBatch<ArchiveMessage>,
-			ENV_BASE as never,
-			{ waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext,
-		);
+		const result = worker.email(makeMessage(body), ENV_BASE as never, makeContext(promises));
+
+		await expect(result).resolves.toBeUndefined();
+		await Promise.all(promises);
 
 		expect(captured).toBeDefined();
-		expect(captured!.method).toBe('PUT');
-		expect(captured!.url).toBe(
-			'https://archive-bucket.p2v3.va.idrivee2-43.com/example.com/user@example.com/mail.example.com/1700000000000.eml.gz',
-		);
-		expect((captured!.headers.get('authorization') ?? '').startsWith('AWS4-HMAC-SHA256 Credential=')).toBe(true);
-		expect(acked).toEqual(['m1']);
-		const uploaded = new Uint8Array(await captured!.arrayBuffer());
-		expect(uploaded).toEqual(payload);
+		expect(attempts).toBe(1);
 	});
 });
