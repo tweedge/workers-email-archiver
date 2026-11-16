@@ -7,9 +7,18 @@
 This is a Workers script that I use to receive email via Cloudflare Workers, compress the raw email, and store that compressed data in an S3-compatible provider for long-term archiving and analysis. It uses:
 
 - the Workers runtime's native [CompressionStream](https://developer.mozilla.org/en-US/docs/Web/API/CompressionStream) to compress data using gzip
+- [Cloudflare Queues](https://developers.cloudflare.com/queues/) to spool compressed messages so the SMTP session can end immediately
 - [aws4fetch](https://github.com/mhart/aws4fetch) to save the compressed data to S3
 
-The worker is written in TypeScript (`src/index.ts`) and, with its dependencies, bundles to roughly 17KB (under 6KB gzipped).
+The worker is written in TypeScript (`src/index.ts`) and, with its dependencies, bundles to roughly 18KB (under 6KB gzipped).
+
+### Delivery model
+
+The `email` handler reads and gzip-compresses the message, then sends the compressed bytes to the `email-archiver-spool` queue and returns. The sender's SMTP session completes with a success once the queue `send()` resolves (Queues confirms writes to disk before resolving), so a slow or failing S3 endpoint no longer turns into a rejected message.
+
+A `queue` consumer (the same Worker) performs the S3 PUT with a longer budget, acknowledging on success and retrying with exponential backoff on failure. Messages that exhaust `max_retries` land in `email-archiver-spool-dlq`, which retains them for 14 days. Because the object key is generated once in `email()`, a retry overwrites the same object instead of creating a duplicate.
+
+Queues caps a message at 128 KB, so compressed payloads above 120 KB (roughly 1.5% of mail by raw size) are still uploaded inline from `email()`; those keep the previous behavior, including a non-2xx SMTP response if the upload fails.
 
 ### Usage
 
@@ -18,6 +27,7 @@ This repo is what I personally use and isn't a template/general-use tool - pleas
 The only variables you'll _probably_ need to tinker with to get started are:
 
 - In `wrangler.toml`, replace `S3_BUCKET` with your bucket name and `S3_ENDPOINT` with the S3 server you're using (this is the full endpoint, the entire domain including the region - if applicable).
+- Create the queues referenced by the `[[queues.*]]` bindings (`npx wrangler queues create email-archiver-spool` and `npx wrangler queues create email-archiver-spool-dlq`), or point those bindings at your own queues.
 - After deploying for the first time, add secrets named `S3_ACCESS_KEY` and `S3_ACCESS_SECRET` with your S3 signing credentials. Or just add them to your `wrangler.toml` if you're sure you won't accidentally commit or expose them (hint: this is a risk, and probably not one worth taking).
 
 Commonly-used commands:

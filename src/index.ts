@@ -1,11 +1,17 @@
 import { AwsClient } from 'aws4fetch';
 
+export interface ArchiveMessage {
+	readonly key: string;
+	readonly body: Uint8Array;
+}
+
 export interface Env {
 	readonly S3_ACCESS_KEY: string;
 	readonly S3_ACCESS_SECRET: string;
 	readonly S3_REGION: string;
 	readonly S3_BUCKET: string;
 	readonly S3_ENDPOINT: string;
+	readonly ARCHIVE_QUEUE: Queue<ArchiveMessage>;
 }
 
 const REDIRECT_URL = 'https://github.com/tweedge/workers-email-archiver';
@@ -17,6 +23,16 @@ const INITIAL_RETRY_MS = 250;
 // around 30s. Keep the whole retry sequence inside a budget well under that.
 const UPLOAD_BUDGET_MS = 20_000;
 const UPLOAD_TIMEOUT_MS = 8_000;
+// Queue consumers get 15 minutes of wall time, so they can afford a longer
+// sequence per message. Bounded anyway so a batch of failures stays well
+// inside that limit.
+const QUEUE_UPLOAD_BUDGET_MS = 30_000;
+const QUEUE_UPLOAD_TIMEOUT_MS = 10_000;
+// Queues caps a message at 128 KB of payload plus ~100 bytes of framework
+// metadata (1 KB counts as 1000 bytes). Leave headroom for the envelope and
+// the object key so a send near the limit can never be rejected after we have
+// already answered the sender.
+const MAX_QUEUED_PAYLOAD_BYTES = 120_000;
 const GZIP_HEADER_LENGTH = 10;
 const GZIP_FLAG_FNAME = 0x08;
 
@@ -156,11 +172,18 @@ function delay(ms: number): Promise<void> {
 /**
  * Uploads with a bounded retry policy covering 5xx/429 responses, timeouts,
  * and transport failures. The whole sequence shares one overall deadline so
- * retries can never outlive the inbound SMTP exchange, and each attempt is
+ * retries can never outlive the caller's invocation, and each attempt is
  * additionally capped by that remaining budget.
  */
-async function uploadWithRetry(aws: AwsClient, url: string, body: Uint8Array, label: string): Promise<void> {
-	const deadline = Date.now() + UPLOAD_BUDGET_MS;
+async function uploadWithRetry(
+	aws: AwsClient,
+	url: string,
+	body: Uint8Array,
+	label: string,
+	budgetMs: number = UPLOAD_BUDGET_MS,
+	timeoutMs: number = UPLOAD_TIMEOUT_MS,
+): Promise<void> {
+	const deadline = Date.now() + budgetMs;
 	let lastError: UploadError | undefined;
 
 	for (let attempt = 0; attempt < UPLOAD_ATTEMPTS; attempt++) {
@@ -178,7 +201,7 @@ async function uploadWithRetry(aws: AwsClient, url: string, body: Uint8Array, la
 				method: 'PUT',
 				// lib.dom's BodyInit omits ArrayBufferView; the Workers runtime accepts it.
 				body: body as unknown as BodyInit,
-				signal: AbortSignal.timeout(Math.min(UPLOAD_TIMEOUT_MS, remaining)),
+				signal: AbortSignal.timeout(Math.min(timeoutMs, remaining)),
 			});
 		} catch (error) {
 			const uploadError = toUploadError(error, label);
@@ -197,6 +220,36 @@ async function uploadWithRetry(aws: AwsClient, url: string, body: Uint8Array, la
 	throw lastError!;
 }
 
+function createAwsClient(env: Env): AwsClient {
+	return new AwsClient({
+		accessKeyId: env.S3_ACCESS_KEY,
+		secretAccessKey: env.S3_ACCESS_SECRET,
+		service: 's3',
+		region: env.S3_REGION,
+		retries: 0,
+	});
+}
+
+function endpointOf(env: Env): string {
+	return `https://${env.S3_BUCKET}.${env.S3_ENDPOINT}/`;
+}
+
+/**
+ * Builds the archive key from the envelope addresses and the archive
+ * timestamp. The timestamp doubles as the gzip filename and the object
+ * basename, and is generated once per message so a queue retry always
+ * overwrites the same object instead of creating a duplicate.
+ */
+function archiveKey(to: string, from: string, timeNow: number): string {
+	const { domain } = splitAddress(to, 'recipient');
+	const { domain: srcDomain } = splitAddress(from, 'sender');
+	return `${encodeKeySegment(domain)}/${encodeKeySegment(to)}/${encodeKeySegment(srcDomain)}/${timeNow}.eml.gz`;
+}
+
+async function uploadToArchive(env: Env, key: string, body: Uint8Array, budgetMs?: number, timeoutMs?: number): Promise<void> {
+	await uploadWithRetry(createAwsClient(env), `${endpointOf(env)}${key}`, body, endpointOf(env), budgetMs, timeoutMs);
+}
+
 export default {
 	async fetch(_request: Request): Promise<Response> {
 		return Response.redirect(REDIRECT_URL, REDIRECT_STATUS);
@@ -208,22 +261,32 @@ export default {
 
 		const compressedEmail = await compressMessage(rawEmail, `${timeNow}.eml`, timeNow);
 
-		const { domain } = splitAddress(message.to, 'recipient');
-		const { domain: srcDomain } = splitAddress(message.from, 'sender');
+		const key = archiveKey(message.to, message.from, timeNow);
 
-		const aws = new AwsClient({
-			accessKeyId: env.S3_ACCESS_KEY,
-			secretAccessKey: env.S3_ACCESS_SECRET,
-			service: 's3',
-			region: env.S3_REGION,
-			retries: 0,
-		});
+		if (compressedEmail.byteLength <= MAX_QUEUED_PAYLOAD_BYTES) {
+			await env.ARCHIVE_QUEUE.send({ key, body: compressedEmail }, { contentType: 'v8' });
+			console.log(`Queued ${key}`);
+			return;
+		}
 
-		const endpoint = `https://${env.S3_BUCKET}.${env.S3_ENDPOINT}/`;
-		const filename = `${encodeKeySegment(domain)}/${encodeKeySegment(message.to)}/${encodeKeySegment(srcDomain)}/${timeNow}.eml.gz`;
+		// Too large to fit a queue message; archive inline as before.
+		await uploadToArchive(env, key, compressedEmail);
 
-		await uploadWithRetry(aws, `${endpoint}${filename}`, compressedEmail, endpoint);
-
-		console.log(`Archived ${filename}`);
+		console.log(`Archived ${key}`);
 	},
-} satisfies ExportedHandler<Env>;
+
+	async queue(batch: MessageBatch<ArchiveMessage>, env: Env, _ctx: ExecutionContext): Promise<void> {
+		for (const message of batch.messages) {
+			const { key, body } = message.body;
+			try {
+				await uploadToArchive(env, key, body, QUEUE_UPLOAD_BUDGET_MS, QUEUE_UPLOAD_TIMEOUT_MS);
+			} catch (error) {
+				console.error(`Retrying ${key} (attempt ${message.attempts}): ${String(error)}`);
+				message.retry({ delaySeconds: Math.min(2 ** message.attempts, 3_600) });
+				continue;
+			}
+			console.log(`Archived ${key}`);
+			message.ack();
+		}
+	},
+} satisfies ExportedHandler<Env, ArchiveMessage>;
