@@ -9,6 +9,17 @@ S3_BUCKET = "dmsh"
 S3_ENDPOINT = "p2v3.va.idrivee2-43.com"
 S3_REGION = "VA-SSD"
 
+[[queues.producers]]
+queue = "email-archiver-spool"
+binding = "ARCHIVE_QUEUE"
+
+[[queues.consumers]]
+queue = "email-archiver-spool"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 20
+dead_letter_queue = "email-archiver-spool-dlq"
+
 [limits]
 cpu_ms = 30000
 
