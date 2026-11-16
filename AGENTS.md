@@ -46,12 +46,11 @@ Work on a branch and open a PR.
 ## Architecture
 
 - `src/index.ts` — the entire Worker. `fetch` redirects to the project page;
-  `email` reads and compresses the message, then hands it to the spool queue
-  (or uploads inline when it cannot fit a queue message); `queue` uploads
-  spooled messages to S3 with retries.
+  `email` reads and compresses the message, returns immediately, and uploads
+  to S3 from `ctx.waitUntil()` with retries.
 - `wrangler.toml` — Worker name, entrypoint, S3 endpoint/bucket/region vars,
-  spool queue producer/consumer bindings, CPU limit, observability, smart
-  placement. S3 credentials are Worker secrets, never in this file.
+  CPU limit, observability, smart placement. S3 credentials are Worker
+  secrets, never in this file.
 - `test/index.test.ts` — unit tests with the S3 endpoint mocked.
 - `test/workers/runtime.test.ts` — integration tests in the real Workers
   runtime via `@cloudflare/vitest-plugin`.
@@ -74,16 +73,17 @@ and needs the user's approval.
    must equal `message.rawSize`. Never pre-allocate or zero-pad.
 4. **Address parsing**: split on the **last** `@`; reject addresses with no
    usable domain rather than writing an `undefined` path segment.
-5. **Bounded uploads**: one shared overall budget and a per-attempt timeout,
-   clamped to the remaining budget. The email path uses 20s/8s, the queue
-   consumer uses 30s/10s (it has a 15-minute wall limit). Retries cover 5xx,
-   429, timeouts, and transport errors; other errors fail immediately.
-6. **Early SMTP answer**: `email()` must return as soon as the message is
-   durably spooled, never after a full upload attempt. Compressed payloads up
-   to `MAX_QUEUED_PAYLOAD_BYTES` (120 KB, under the 128 KB queue limit) are
-   sent to `ARCHIVE_QUEUE` and nothing else; only oversized payloads fall back
-   to the inline upload. The queue `key` is generated once in `email()` so a
-   consumer retry overwrites the same object rather than duplicating it.
+5. **Bounded uploads**: one shared overall budget (25s) and a per-attempt
+   timeout (8s), clamped to the remaining budget, and at most six attempts.
+   The budget must stay inside the 30s `waitUntil()` window. Retries cover
+   5xx, 429, timeouts, and transport errors; other errors fail immediately.
+6. **Early SMTP answer, single Worker**: `email()` must return as soon as the
+   message is read and compressed, never after an upload attempt. The upload
+   runs in `ctx.waitUntil()` and is best-effort: it logs and swallows failures
+   instead of rejecting, because the sender has already been told the message
+   was accepted. There is no queue, Durable Object, or R2 spool — do not add
+   one. Occasional loss after the 250 is an accepted trade for cheapness and
+   simplicity.
 7. **Compression**: native `CompressionStream('gzip')`, with the gzip header
    rewritten so `filename`/`mtime` are set to the archive timestamp and the
    FNAME flag is set. The deflate payload and CRC32/ISIZE trailer must be
