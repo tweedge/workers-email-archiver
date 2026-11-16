@@ -6,10 +6,10 @@
 
 This is a Workers script that I use to receive email via Cloudflare Workers, compress the raw email, and store that compressed data in an S3-compatible provider for long-term archiving and analysis. It uses:
 
-- [fflate](https://github.com/101arrowz/fflate) to compress data using gzip
+- the Workers runtime's native [CompressionStream](https://developer.mozilla.org/en-US/docs/Web/API/CompressionStream) to compress data using gzip
 - [aws4fetch](https://github.com/mhart/aws4fetch) to save the compressed data to S3
 
-The worker is written in TypeScript (`src/index.ts`) and, with its dependencies, bundles to roughly 30KB (under 10KB gzipped).
+The worker is written in TypeScript (`src/index.ts`) and, with its dependencies, bundles to roughly 17KB (under 6KB gzipped).
 
 ### Usage
 
