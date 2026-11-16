@@ -22,8 +22,7 @@
 		"test:runtime": "vitest run --config vitest.workers.config.mts"
 	},
 	"dependencies": {
-		"aws4fetch": "^1.0.20",
-		"fflate": "^0.8.3"
+		"aws4fetch": "^1.0.20"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-plugin": "^1.8.2",

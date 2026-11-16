@@ -75,8 +75,10 @@ and needs the user's approval.
 5. **Bounded uploads**: one shared overall budget (20s) and a per-attempt
    timeout (8s), clamped to the remaining budget. Retries cover 5xx, 429,
    timeouts, and transport errors; other errors fail immediately.
-6. **Compression**: gzip level 9 with `filename`/`mtime` set to the archive
-   timestamp.
+6. **Compression**: native `CompressionStream('gzip')`, with the gzip header
+   rewritten so `filename`/`mtime` are set to the archive timestamp and the
+   FNAME flag is set. The deflate payload and CRC32/ISIZE trailer must be
+   preserved untouched.
 
 ## Commands
 

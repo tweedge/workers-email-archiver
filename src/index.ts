@@ -1,5 +1,4 @@
 import { AwsClient } from 'aws4fetch';
-import { gzipSync } from 'fflate';
 
 export interface Env {
 	readonly S3_ACCESS_KEY: string;
@@ -18,6 +17,8 @@ const INITIAL_RETRY_MS = 250;
 // around 30s. Keep the whole retry sequence inside a budget well under that.
 const UPLOAD_BUDGET_MS = 20_000;
 const UPLOAD_TIMEOUT_MS = 8_000;
+const GZIP_HEADER_LENGTH = 10;
+const GZIP_FLAG_FNAME = 0x08;
 
 class UploadError extends Error {
 	readonly retryable: boolean;
@@ -108,6 +109,38 @@ function isRetryableStatus(status: number): boolean {
 	return status === 429 || status >= 500;
 }
 
+const gzipEncoder = new TextEncoder();
+
+/**
+ * Compresses with the runtime's native gzip (`CompressionStream`) instead of a
+ * JS deflate implementation, which cuts CPU time several-fold on large mail.
+ * The native encoder writes a bare 10-byte header, so the archive timestamp
+ * and filename are patched into a fresh header; the deflate payload and the
+ * CRC32/ISIZE trailer are preserved byte-for-byte.
+ */
+async function compressMessage(raw: Uint8Array, filename: string, mtimeMs: number): Promise<Uint8Array> {
+	const gzipped = new Uint8Array(
+		await new Response(new Response(raw as unknown as BodyInit).body!.pipeThrough(new CompressionStream('gzip'))).arrayBuffer(),
+	);
+
+	const name = gzipEncoder.encode(filename);
+	const header = new Uint8Array(GZIP_HEADER_LENGTH);
+	new DataView(header.buffer).setUint32(4, Math.floor(mtimeMs / 1000), true);
+	header[0] = 0x1f;
+	header[1] = 0x8b;
+	header[2] = 8;
+	header[3] = GZIP_FLAG_FNAME;
+	header[9] = 3;
+
+	const payload = gzipped.subarray(GZIP_HEADER_LENGTH);
+	const body = new Uint8Array(GZIP_HEADER_LENGTH + name.length + 1 + payload.length);
+	body.set(header, 0);
+	body.set(name, GZIP_HEADER_LENGTH);
+	body[GZIP_HEADER_LENGTH + name.length] = 0;
+	body.set(payload, GZIP_HEADER_LENGTH + name.length + 1);
+	return body;
+}
+
 function toUploadError(error: unknown, label: string): UploadError {
 	if (error instanceof Error) {
 		const retryable = error.name === 'AbortError' || error.name === 'TimeoutError' || error instanceof TypeError;
@@ -173,12 +206,7 @@ export default {
 		const timeNow = Date.now();
 		const rawEmail = await readMessage(message.raw, message.rawSize);
 
-		const compressedEmail = gzipSync(rawEmail, {
-			// GZIP-specific: the filename and time to use when decompressed
-			filename: `${timeNow}.eml`,
-			mtime: timeNow,
-			level: 9,
-		});
+		const compressedEmail = await compressMessage(rawEmail, `${timeNow}.eml`, timeNow);
 
 		const { domain } = splitAddress(message.to, 'recipient');
 		const { domain: srcDomain } = splitAddress(message.from, 'sender');

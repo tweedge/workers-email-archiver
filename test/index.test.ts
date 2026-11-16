@@ -242,7 +242,7 @@ describe('email handler', () => {
 		expect(captured).toBeUndefined();
 	});
 
-	it('compresses with gzip level 9 and embeds filename and mtime', async () => {
+	it('compresses with the native gzip encoder and embeds filename and mtime', async () => {
 		const message = makeMessage({});
 
 		await worker.email(message, ENV, makeContext());
@@ -253,7 +253,7 @@ describe('email handler', () => {
 		expect(header.method).toBe(8);
 		expect(header.flags & 0x08).toBe(0x08);
 		expect(header.mtime).toBe(NOW_SECONDS);
-		expect(header.xfl).toBe(2);
+		expect(header.xfl).toBe(0);
 		expect([0, 3, 255]).toContain(header.os);
 		expect(header.filename).toBe(`${NOW}.eml`);
 		expect(decompressBody(captured!)).toEqual(DEFAULT_BODY);
